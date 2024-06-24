@@ -12,10 +12,12 @@ from chat import Chat
 from fsi_agent import FSIAgent
 from boto3.dynamodb.conditions import Key
 from langchain.llms.bedrock import Bedrock
+from langchain.chains import ConversationChain
 
 # Create reference to DynamoDB tables and S3 bucket
-loan_application_table_name = os.environ['USER_PENDING_ACCOUNTS_TABLE']
-user_accounts_table_name = os.environ['USER_EXISTING_ACCOUNTS_TABLE']
+users_table_name = os.environ['USERS_TABLE_NAME']
+claims_table_name = os.environ['CLAIMS_TABLE_NAME']
+insurance_quote_requests_table_name = os.environ['INSURACE_QUOTE_REQUESTS_TABLE_NAME']
 s3_artifact_bucket = os.environ['S3_ARTIFACT_BUCKET_NAME']
 
 # Instantiate boto3 clients and resources
@@ -77,16 +79,20 @@ def elicit_intent(intent_request, session_attributes, message):
                 'imageResponseCard': {
                     "buttons": [
                         {
-                            "text": "Loan Application",
-                            "value": "Loan Application"
+                            "text": "Request Home Quote",
+                            "value": "Home"
                         },
                         {
-                            "text": "Loan Calculator",
-                            "value": "Loan Calculator"
+                            "text": "Request Auto Quote",
+                            "value": "Auto"
+                        },
+                        {
+                            "text": "Request Life Quote",
+                            "value": "Life"
                         },
                         {
                             "text": "Ask GenAI",
-                            "value": "What kind of questions can the Assistant answer?"
+                            "value": "What kind of questions can the assistant answer?"
                         }
                     ],
                     "title": "How can I help you?"
@@ -146,20 +152,12 @@ def build_validation_result(isvalid, violated_slot, message_content):
     
 # --- Utility helper functions ---
 
-def isvalid_date(date):
-    try:
-        dateutil.parser.parse(date, fuzzy=True)
-        return True
-    except ValueError as e:
-        print("DATE PARSER ERROR: " + str(e)) # TODO
-        return False
-
-def isvalid_yes_or_no(word):
-    reference_words = ['yes', 'no', 'yep', 'nope']
-    similarity_threshold = 0.7  # Adjust this threshold as needed
+def isvalid_slot_value(value, slot_value_list):
+    # Adjust this threshold as needed
+    similarity_threshold = 0.7
 
     # Calculate similarity using difflib
-    similarity_scores = [difflib.SequenceMatcher(None, word.lower(), ref_word).ratio() for ref_word in reference_words]
+    similarity_scores = [difflib.SequenceMatcher(None, value.lower(), ref_value).ratio() for ref_value in slot_value_list]
 
     # Check if the word is close to 'yes' or 'no' based on similarity threshold
     return any(score >= similarity_threshold for score in similarity_scores)
@@ -169,66 +167,69 @@ def isvalid_credit_score(credit_score):
         return True
     return False
 
-def isvalid_zero_or_greater(value):
-    if int(value) >= 0:
-        return True
-    return False
-
-def safe_int(n):
-    if n is not None:
-        return int(n)
-    return n
-
 def create_presigned_url(bucket_name, object_name, expiration=600):
     """
     Generate a presigned URL for the S3 object.
     """
     try:
-        response = s3_client.generate_presigned_url('get_object',
-                                                    Params={'Bucket': bucket_name,
-                                                            'Key': object_name},
-                                                    ExpiresIn=expiration)
+        response = s3_client.generate_presigned_url('get_object', Params={'Bucket': bucket_name, 'Key': object_name}, ExpiresIn=expiration)
+        return response
     except Exception as e:
-        print(e)
-        logging.error(e)
-        return "Error"
+        print(f"Error creating S3 presigned URL: {e}")
 
-    # The response contains the presigned URL
-    return response
+    return None
 
 def try_ex(value):
     """
     Safely access slots dictionary values.
     """
-    if value is not None:
-        if value['value']['resolvedValues']:
-            return value['value']['interpretedValue']
-        elif value['value']['originalValue']:
-            return value['value']['originalValue']
-        else:
-            return None
-    else:
-        return None
+    if value and value.get('value'):
+        return value['value'].get('interpretedValue') or value['value'].get('originalValue')
+    return None
 
-# --- Intent fulfillment functions --- 
-
-def isvalid_pin(userName, pin):
+def get_user_by_policy_id(policyId):
     """
-    Validates the user-provided PIN using a DynamoDB table lookup.
+    Retrieves user information based on the provided policyId using a GSI.
     """
-    plans_table = dynamodb.Table(user_accounts_table_name)
+    users_table = dynamodb.Table(users_table_name)
 
     try:
-        # Set up the query parameters
+        # Set up the query parameters for the GSI
         params = {
-            'KeyConditionExpression': 'userName = :c',
+            'IndexName': 'PolicyIdIndex',
+            'KeyConditionExpression': 'policyId = :pid',
             'ExpressionAttributeValues': {
-                ':c': userName
+                ':pid': policyId
             }
         }
 
         # Execute the query and get the result
-        response = plans_table.query(**params)
+        response = users_table.query(**params)
+
+        # Check if any items were returned
+        if response['Count'] > 0:
+            return response['Items']
+        else:
+            print("No user found with the given policyId")
+
+    except Exception as e:
+        print(f"Error retrieving user by policyId: {e}")
+    
+    return None 
+
+# --- Intent fulfillment functions ---
+
+def isvalid_pin(username, pin):
+    """
+    Validates the user-provided PIN using a DynamoDB table lookup.
+    """
+    users_table = dynamodb.Table(users_table_name)
+
+    try:
+        # Query the table using the partition key
+        response = users_table.query(
+            KeyConditionExpression=Key('userName').eq(username)
+        )
 
         # Iterate over the items returned in the response
         if len(response['Items']) > 0:
@@ -237,29 +238,30 @@ def isvalid_pin(userName, pin):
             if pin_to_compare == int(pin):
                 return True
 
+        print("PIN did not match")
         return False
 
     except Exception as e:
-        print(e)
+        print(f"Error validating PIN: {e}")
         return e
 
-def isvalid_username(userName):
+def isvalid_username(username):
     """
-    Validates the user-provided username exists in the 'user_accounts_table_name' DynamoDB table.
+    Validates the user-provided username exists in the 'claims_table_name' DynamoDB table.
     """
-    plans_table = dynamodb.Table(user_accounts_table_name)
+    users_table = dynamodb.Table(users_table_name)
 
     try:
         # Set up the query parameters
         params = {
             'KeyConditionExpression': 'userName = :c',
             'ExpressionAttributeValues': {
-                ':c': userName
+                ':c': username
             }
         }
 
         # Execute the query and get the result
-        response = plans_table.query(**params)
+        response = users_table.query(**params)     
 
         # Check if any items were returned
         if response['Count'] != 0:
@@ -267,16 +269,13 @@ def isvalid_username(userName):
         else:
             return False
     except Exception as e:
-        print(e)
+        print(f"Error validating username: {e}")
         return e
 
-def validate_pin(intent_request, slots):
+def validate_pin(intent_request, username, pin):
     """
     Elicits and validates user input values for username and PIN. Invoked as part of 'verify_identity' intent fulfillment.
     """
-    username = try_ex(slots['UserName'])
-    pin = try_ex(slots['Pin'])
-
     if username is not None:
         if not isvalid_username(username):
             return build_validation_result(
@@ -287,7 +286,6 @@ def validate_pin(intent_request, slots):
         session_attributes = intent_request['sessionState'].get("sessionAttributes") or {}
         session_attributes['UserName'] = username
         intent_request['sessionState']['sessionAttributes']['UserName'] = username
-
     else:
         return build_validation_result(
             False,
@@ -315,6 +313,9 @@ def validate_pin(intent_request, slots):
 def verify_identity(intent_request):
     """
     Performs dialog management and fulfillment for username verification.
+    Beyond fulfillment, the implementation for this intent demonstrates the following:
+    1) Use of elicitSlot in slot validation and re-prompting.
+    2) Use of sessionAttributes {UserName} to pass information that can be used to guide conversation.
     """
     slots = intent_request['sessionState']['intent']['slots']
     pin = try_ex(slots['Pin'])
@@ -326,7 +327,8 @@ def verify_identity(intent_request):
     active_contexts = {}
 
     # Validate any slots which have been specified. If any are invalid, re-elicit for their value
-    validation_result = validate_pin(intent_request, intent_request['sessionState']['intent']['slots'])
+    intent_request['sessionState']['intent']['slots']
+    validation_result = validate_pin(intent_request, username, pin)
     session_attributes['UserName'] = username
 
     if not validation_result['isValid']:
@@ -343,52 +345,324 @@ def verify_identity(intent_request):
     else:
         if confirmation_status == 'None':
             # Query DDB for user information before offering intents
-            plans_table = dynamodb.Table(user_accounts_table_name)
+            users_table = dynamodb.Table(users_table_name)
 
             try:
                 # Query the table using the partition key
-                response = plans_table.query(
+                response = users_table.query(
                     KeyConditionExpression=Key('userName').eq(username)
                 )
 
-                # TODO: Customize account readout based on account type
+                # Customize message based on coverage type
                 message = ""
                 items = response['Items']
                 for item in items:
-                    if item['planName'] == 'mortgage' or item['planName'] == 'Mortgage':
-                        message = "Your mortgage account summary includes a ${:,} loan at {}% interest with ${:,} of unpaid principal. Your next payment of ${:,} is scheduled for {}.".format(item['loanAmount'], item['loanInterest'], item['unpaidPrincipal'], item['amountDue'], item['dueDate'])
-                    elif item['planName'] == 'Checking' or item['planName'] == 'checking':
-                        message = "I see you have a Savings account with AnyCompany. Your account balance is ${:,} and your next payment \
-                            amount of ${:,} is scheduled for {}.".format(item['unpaidPrincipal'], item['paymentAmount'], item['dueDate'])
-                    elif item['planName'] == 'Loan' or item['planName'] == 'loan':
-                            message = "I see you have a Loan account with AnyCompany. Your account balance is ${:,} and your next payment \
-                            amount of ${:,} is scheduled for {}.".format(item['unpaidPrincipal'], item['paymentAmount'], item['dueDate'])
+                    coverage_type = item.get('coverageType', None)
+                    if coverage_type == 'Home':
+                        message += f"Your home insurance policy provides comprehensive coverage for your property located at {item['propertyAddress']['street']} in {item['propertyAddress']['city']}, {item['propertyAddress']['state']} {item['propertyAddress']['zip']}. "
+                        message += f"The policy started on {item['policyStartDate']} and ends on {item['policyEndDate']}. "
+                        message += f"Your deductible amount is ${item['deductibleAmount']:,}."
+                    elif coverage_type == 'Auto':
+                        message += f"Your auto insurance policy covers your {item['vehicleMake']} {item['vehicleModel']} {item['vehicleYear']} with comprehensive coverage. "
+                        message += f"The policy started on {item['policyStartDate']} and ends on {item['policyEndDate']}. "
+                        message += f"Your insured amount is ${item['insuredAmount']:,}."
+                    elif coverage_type == 'Life':
+                        message += f"Your life insurance policy provides coverage for you with an insured amount of ${item['insuredAmount']:,}. "
+                        message += f"The policy started on {item['policyStartDate']} and ends on {item['policyEndDate']}."
+
                 return elicit_intent(intent_request, session_attributes, 
-                    'Thank you for confirming your username and PIN, {}. {}'.format(username, message)
-                    )
+                    f'Thank you for confirming your username and PIN, {username}. {message}'
+                )
 
             except Exception as e:
-                print(e)
+                print(f"Error querying DynamoDB: {e}")
                 return e
 
-def validate_loan_application(intent_request, slots):
-    """
-    Elicits and validates slot values provided by the user. Invoked as part of 'loan_application' intent fulfillment.
-    """
-    username = try_ex(slots['UserName'])
-    loan_value = try_ex(slots['LoanValue'])
-    monthly_income = try_ex(slots['MonthlyIncome'])
-    work_history = try_ex(slots['WorkHistory'])
-    credit_score = try_ex(slots['CreditScore'])
-    housing_expense = try_ex(slots['HousingExpense'])
-    debt_amount = try_ex(slots['DebtAmount'])
-    down_payment = try_ex(slots['DownPayment'])
-    coborrow = try_ex(slots['Coborrow'])
-    closing_date = try_ex(slots['ClosingDate'])
 
+def validate_home_insurance(intent_request, session_id, property_value, year_built, home_type, square_footage, home_security_system, home_coverage):
+    """
+    Validates slot values specific to Home insurance.
+    """
+    if property_value is not None:
+        if not property_value.isnumeric():
+            prompt = "The user was just asked to provide their property value as part of a home insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nWhat is the estimated value of your home?"
+            return build_validation_result(False, 'PropertyValue', reply)
+        elif int(property_value) < 0:
+            return build_validation_result(
+                False,
+                'PropertyValue',
+                'The property value must be a positive number.'
+            )
+    else:
+        return build_validation_result(
+            False,
+            'PropertyValue',
+            'What is the estimated value of your home?'
+        )
+
+    if year_built is not None:
+        if not year_built.isnumeric():
+            prompt = "The user was just asked to provide the year their home was built as part of an insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nWhich year was your home built?"
+            return build_validation_result(False, 'PropertyValue', reply)
+        elif int(year_built) < 0 or int(year_built) > datetime.datetime.now().year: 
+            return build_validation_result(
+                False,
+                'YearBuilt',
+                'The year built must be a valid year.'
+            )
+    else:
+        return build_validation_result(
+            False,
+            'YearBuilt',
+            'Which year was your home built?'
+        )
+
+    if home_type is not None:
+        home_type_list = ['single-family', 'multi-family', 'condo', 'townhouse']
+        if not isvalid_slot_value(home_type, home_type_list):
+            prompt = "The user was asked to specify the type of home [Single-Family, Multi-Family, Condo, Townhouse] and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nPlease specify the type of home [Single-Family, Multi-Family, Condo, Townhouse]."
+            return build_validation_result(False, 'HomeType', reply)
+    else:
+        return build_validation_result(
+            False,
+            'HomeType',
+            'Please specify the type of home [Single-Family, Multi-Family, Condo, Townhouse].'
+        )
+
+    if square_footage is not None:
+        if square_footage.isnumeric():
+            if int(square_footage) < 0:
+                return build_validation_result(
+                    False,
+                    'SquareFootage',
+                    'The square footage must be a positive number.'
+                )
+        else:
+            prompt = "The user was just asked to provide the square footage of their home as part of an insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nWhat is the square footage of your home?"
+            return build_validation_result(False, 'PropertyValue', reply)
+    else:
+        return build_validation_result(
+            False,
+            'SquareFootage',
+            'What is the square footage of your home?'
+        )
+
+    if home_security_system is not None:
+        security_system_list = ['yes', 'no']
+        if not isvalid_slot_value(home_security_system, security_system_list):
+            prompt = "The user was asked if they have a home security system [Yes, No] as part of an insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nDo you have a home security system [Yes, No]?"
+            return build_validation_result(False, 'HomeSecuritySystem', reply)
+    else:
+        return build_validation_result(
+            False,
+            'HomeSecuritySystem',
+            'Do you have a home security system [Yes, No]?'
+        )
+
+    if home_coverage is not None:
+        home_coverage_list = ['structure', 'contents', 'liability']
+        if not isvalid_slot_value(home_coverage, home_coverage_list):
+            prompt = "The user was asked to specify the type of home coverage [Structure, Contents, Liability] as part of an insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nPlease specify the type of home coverage [Structure, Contents, Liability]."
+            return build_validation_result(False, 'HomeCoverage', reply)
+    else:
+        return build_validation_result(
+            False,
+            'HomeCoverage',
+            'Please specify the type of home coverage [Structure, Contents, Liability].'
+        )   
+
+
+def validate_auto_insurance(intent_request, session_id, property_value, age_of_insured, auto_year, annual_mileage, parking_location, previous_claims):
+    """
+    Validates slot values specific to Auto insurance.
+    """
+    if property_value is not None:
+        if property_value.isnumeric():
+            if int(property_value) < 0:
+                return build_validation_result(
+                    False,
+                    'PropertyValue',
+                    'The car value must be a positive number.'
+                )
+        else:
+            prompt = "The user was just asked for their car value as part of an auto insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nWhat is the estimated value of your car?"
+            return build_validation_result(False, 'PropertyValue', reply)
+    else:
+        return build_validation_result(
+            False,
+            'PropertyValue',
+            'What is the estimated value of your car?'
+        )
+
+    if age_of_insured is not None:
+        if age_of_insured.isnumeric():
+            if int(age_of_insured) < 17:
+                return build_validation_result(
+                    False,
+                    'AgeOfInsured',
+                    'The age of the insured must be 18 years or older.'
+                )
+        else:
+            prompt = "The user was just asked for the age of the insured on an auto insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nWhat is the age of the insured?"
+            return build_validation_result(False, 'AgeOfInsured', reply)
+    else:
+        return build_validation_result(
+            False,
+            'AgeOfInsured',
+            'What is the age of the insured?'
+        )
+
+    if auto_year is not None:
+        if not auto_year.isnumeric():
+            prompt = "The user was just asked which year their vehicle was built as part of an auto insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nWhich year was your vehicle built?"
+            return build_validation_result(False, 'AutoYear', reply)        
+        elif int(auto_year) < 0 or int(auto_year) > datetime.datetime.now().year:
+            return build_validation_result(
+                False,
+                'AutoYear',
+                'Specify a valid build year for your vehicle.'
+            )
+    else:
+        return build_validation_result(
+            False,
+            'AutoYear',
+            'Which year was your vehicle built?'
+        )
+
+    if annual_mileage is not None:
+        if annual_mileage.isnumeric():
+            if int(annual_mileage) < 0:
+                return build_validation_result(
+                    False,
+                    'AnnualMileage',
+                    'Annual mileage must be a positive number.'
+                )
+        else:
+            prompt = "The user was just asked for the estimated annual mileage as part of an auto insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nWhat is the estimated annual mileage of your car?"
+            return build_validation_result(False, 'AnnualMileage', reply)
+    else:
+        return build_validation_result(
+            False,
+            'AnnualMileage',
+            'What is the estimated annual mileage of your car?'
+        )
+
+    if parking_location is not None:
+        parking_location_list = ['garage', 'street', 'driveway']
+        if not isvalid_slot_value(parking_location, parking_location_list):
+            prompt = "The user was just asked where their car is usually parked (Garage, Street, Driveway) as part of an auto insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nWhere is your car usually parked [Garage, Street, Driveway]?"
+            return build_validation_result(False, 'ParkingLocation', reply)
+    else:
+        return build_validation_result(
+            False,
+            'ParkingLocation',
+            'Where is your car usually parked [Garage, Street, Driveway]?'
+        )
+
+    if previous_claims is not None:
+        previous_claims_list = ['yes', 'no']
+        if not isvalid_slot_value(previous_claims, previous_claims_list):
+            prompt = "The user was just asked if they have filed any auto insurance claims in the last three years ['Yes', 'No'] as part of an auto insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nHave you filed any auto insurance claims in the past three years [Yes/No]?"
+            return build_validation_result(False, 'PreviousClaims', reply)
+    else:
+        return build_validation_result(
+            False,
+            'PreviousClaims',
+            'Have you filed any auto insurance claims in the past three years [Yes/No]?'
+        )
+
+
+def validate_life_insurance(intent_request, session_id, life_policy_type, age_of_insured, annual_income):
+    """
+    Validates slot values specific to Life insurance.
+    """
+    if life_policy_type is not None:
+        life_policy_type_list = ['term', 'whole', 'universal', 'variable']
+        if not isvalid_slot_value(life_policy_type, life_policy_type_list):
+            prompt = "The user was asked to specify the type of life insurance policy [Term, Whole, Universal] and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nPlease specify the type of life insurance policy [Term, Whole, Universal]."
+            return build_validation_result(False, 'LifePolicyType', reply)
+
+    else:
+        return build_validation_result(
+            False,
+            'LifePolicyType',
+            'Please specify the type of life insurance policy [Term, Whole, Universal, Variable].'
+        )
+
+    if age_of_insured is not None:
+        if age_of_insured.isnumeric():
+            if int(age_of_insured) < 0:
+                return build_validation_result(
+                    False,
+                    'AgeOfInsured',
+                    'The age of the insured must be a positive number.'
+                )
+        else:
+            prompt = "The user was just asked for the age of the insured as part of a life insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nWhat is the age of the insured?"
+            return build_validation_result(False, 'AgeOfInsured', reply)
+    else:
+        return build_validation_result(
+            False,
+            'AgeOfInsured',
+            'What is the age of the insured?'
+        )
+
+    if annual_income is not None:
+        if annual_income.isnumeric():
+            if int(annual_income) < 0:
+                return build_validation_result(
+                    False,
+                    'AnnualIncome',
+                    'Annual income must be a positive number.'
+                )                
+        else:
+            prompt = "The user was asked for the insured's annual income as part of a life insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nWhat is the insured's annual income?"
+            return build_validation_result(False, 'AnnualIncome', reply)
+    else:
+        return build_validation_result(
+            False,
+            'AnnualIncome',
+            "What is the insured's annual income?"
+        )
+
+
+def validate_insurance_quote(intent_request, username, policy_type, policy_start_date, slots):
+    """
+    Elicits and validates slot values provided by the user for insurance quote generation.
+    """
     confirmation_status = intent_request['sessionState']['intent']['confirmationState']
     session_attributes = intent_request['sessionState'].get("sessionAttributes") or {}
-    active_contexts = {}
+    session_id = intent_request['sessionId']
 
     if username is not None:
         if not isvalid_username(username):
@@ -408,251 +682,137 @@ def validate_loan_application(intent_request, slots):
                 'We cannot find an account under that username. Please try again with a valid username.'
             )
 
-    if loan_value is not None:
-        if loan_value.isnumeric():
-            if not isvalid_zero_or_greater(loan_value):
-                return build_validation_result(False, 'LoanValue', 'Please enter a value greater than $0.')
-        else:
-            prompt = "The user was just asked to provide their loan value on a loan application and this was their response: " + intent_request['inputTranscript']
-            message = invoke_agent(prompt)
-            reply = message + " \n\nWhat is your desired loan amount?"
+    if policy_type is not None:
+        if policy_type == 'Home':
+            # Home slot values
+            property_value = try_ex(slots['PropertyValue'])
+            year_built = try_ex(slots['YearBuilt'])
+            home_type = try_ex(slots['HomeType'])
+            square_footage = try_ex(slots['SquareFootage'])
+            home_security_system = try_ex(slots['HomeSecuritySystem'])
+            home_coverage = try_ex(slots['HomeCoverage'])
 
-            return build_validation_result(False, 'LoanValue', reply)
+            validation_results = validate_home_insurance(intent_request, session_id, property_value, year_built, home_type, square_footage, home_security_system, home_coverage)
+
+            if not validation_results['isValid']:
+                return validation_results
+
+        elif policy_type == 'Auto':
+            # Auto slot values
+            property_value = try_ex(slots['PropertyValue'])
+            age_of_insured = try_ex(slots['AgeOfInsured'])
+            auto_year = try_ex(slots['AutoYear'])
+            annual_mileage = try_ex(slots['AnnualMileage'])
+            parking_location = try_ex(slots['ParkingLocation'])
+            previous_claims = try_ex(slots['PreviousClaims'])
+
+            validation_results = validate_auto_insurance(intent_request, session_id, property_value, age_of_insured, auto_year, annual_mileage, parking_location, previous_claims)
+            if not validation_results['isValid']:
+                return validation_results
+
+        elif policy_type == 'Life':
+            # Life slot values
+            life_policy_type = try_ex(slots['LifePolicyType'])
+            age_of_insured = try_ex(slots['AgeOfInsured'])
+            annual_income = try_ex(slots['AnnualIncome'])
+
+            validation_results = validate_life_insurance(intent_request, session_id, life_policy_type, age_of_insured, annual_income)
+            if not validation_results['isValid']:
+                return validation_results
     else:
         return build_validation_result(
             False,
-            'LoanValue',
-            "What is your desired loan amount? In other words, how much are looking to borrow?"
+            'PolicyType',
+            'Which type of insurance policy do you need [Home, Auto, Life]?'
         )
 
-    if monthly_income is not None:
-        if monthly_income.isnumeric():
-            if not isvalid_zero_or_greater(monthly_income):
-                return build_validation_result(False, 'MonthlyIncome', 'Monthly income amount must be greater than $0. Please try again.')
-        else:
-            prompt = "The user was just asked to provide their monthly income on a loan application and this was their response: " + intent_request['inputTranscript']
-            message = invoke_agent(prompt)
-            reply = message + " \n\nWhat is your monthly income?"
-
-            return build_validation_result(False, 'MonthlyIncome', reply)
-    else:
+    if policy_start_date is None:
         return build_validation_result(
             False,
-            'MonthlyIncome',
-            "What is your monthly income?"
-        )
-
-    if work_history is not None:
-        if not isvalid_yes_or_no(work_history):
-            prompt = "The user was just asked to confirm their continuous two year work history on a loan application and this was their response: " + intent_request['inputTranscript']
-            message = invoke_agent(prompt)
-            reply = message + " \n\nDo you have a two-year continuous work history?"
-
-            return build_validation_result(False, 'WorkHistory', reply)
-    else:
-        return build_validation_result(
-            False,
-            'WorkHistory',
-            "Do you have a two-year continuous work history?"
-        )
-
-    if credit_score is not None:
-        if credit_score.isnumeric():
-            if not isvalid_credit_score(credit_score):
-                return build_validation_result(False, 'CreditScore', 'Credit score entries must be between 300 and 850. Please enter a valid credit score.')
-        else:
-            prompt = "The user was just asked to provide their credit score on a loan application and this was their response: " + intent_request['inputTranscript']
-            message = invoke_agent(prompt)
-            reply = message + " \n\nWhat do you think your current credit score is?"
-
-            return build_validation_result(False, 'CreditScore', reply)
-    else:
-        return build_validation_result(
-            False,
-            'CreditScore',
-            "What do you think your current credit score is?"
-        )
-
-    if housing_expense is not None:
-        if housing_expense.isnumeric():
-            if not isvalid_zero_or_greater(housing_expense):
-                return build_validation_result(False, 'HousingExpense', 'Your housing expense must be a value greater than or equal to $0. Please try again.')
-        else:
-            prompt = "The user was just asked to provide their monthly housing expense on a loan application and this was their response: " + intent_request['inputTranscript']
-            message = invoke_agent(prompt)
-            reply = message + " \n\nHow much are you currently paying for housing each month?"
-
-            return build_validation_result(False, 'HousingExpense', reply)
-    else:
-        return build_validation_result(
-            False,
-            'HousingExpense',
-            "How much are you currently paying for housing each month?"
-        )
-
-    if debt_amount is not None:
-        if debt_amount.isnumeric():
-            if not isvalid_zero_or_greater(debt_amount):
-                return build_validation_result(False, 'DebtAmount', 'Your debt amount must be a value greater than or equal to $0. Please try again.')
-        else:
-            prompt = "The user was just asked to provide their monthly debt amount on a loan application and this was their response: " + intent_request['inputTranscript']
-            message = invoke_agent(prompt)
-            reply = message + " \n\nWhat is your estimated credit card or student loan debt?"
-
-            return build_validation_result(False, 'DebtAmount', reply)
-    else:
-        return build_validation_result(
-            False,
-            'DebtAmount',
-            "What is your estimated credit card or student loan debt?"
-        )
-
-    if down_payment is not None:
-        if down_payment.isnumeric():
-            if not isvalid_zero_or_greater(down_payment):
-                return build_validation_result(False, 'DownPayment', 'Your estimate down payment must be a value greater than or equal to $0. Please try again.')
-        else:
-            prompt = "The user was just asked to provide their estimated down payment on a loan application and this was their response: " + intent_request['inputTranscript']
-            message = invoke_agent(prompt)
-            reply = message + " \n\nWhat do you have saved for a down payment?"
-
-            return build_validation_result(False, 'DownPayment', reply)
-    else:
-        return build_validation_result(
-            False,
-            'DownPayment',
-            "What do you have saved for a down payment?"
-        )
-
-    if coborrow is not None:
-        if not isvalid_yes_or_no(coborrow):
-            prompt = "The user was just asked to confirm if they will have a co-borrow on a loan application and this was their response: " + intent_request['inputTranscript']
-            message = invoke_agent(prompt)
-            reply = message + " \n\nDo you have a co-borrower?"
-
-            return build_validation_result(False, 'Coborrow', reply)
-    else:
-        return build_validation_result(
-            False,
-            'Coborrow',
-            "Do you have a co-borrower?"
-        )
-
-    if closing_date is not None:
-        if not isvalid_date(closing_date):
-            prompt = "The user was just asked to provide their real estate closing date on a loan application and this was their response: " + intent_request['inputTranscript']
-            message = invoke_agent(prompt)
-            reply = message + " \n\nWhen are you looking to close?"
-
-            return build_validation_result(False, 'ClosingDate', reply)  
-    else:
-        return build_validation_result(
-            False,
-            'ClosingDate',
-            'When are you looking to close?'
+            'PolicyStartDate',
+            'When would you like the policy to start?'
         )
 
     return {'isValid': True}
 
-def loan_application(intent_request):
-    """
-    Performs dialog management and fulfillment for completing a mortgage loan application.
 
-    Beyond fulfillment, the implementation for this intent demonstrates the following:
-    1) Use of elicitSlot in slot validation and re-prompting
-    2) Use of sessionAttributes to pass information that can be used to guide conversation
+def generate_insurance_quote(intent_request):
+    """
+    Performs dialog management and fulfillment for completing an insurance quote request.
     """
     slots = intent_request['sessionState']['intent']['slots']
-
+    
+    # Common slots regardless of 'policy_type'
     username = try_ex(slots['UserName'])
-    loan_value = try_ex(slots['LoanValue'])
-    monthly_income = try_ex(slots['MonthlyIncome'])
-    work_history = try_ex(slots['WorkHistory'])
-    credit_score = try_ex(slots['CreditScore'])
-    housing_expense = try_ex(slots['HousingExpense'])
-    debt_amount = try_ex(slots['DebtAmount'])
-    down_payment = try_ex(slots['DownPayment'])
-    coborrow = try_ex(slots['Coborrow'])
-    closing_date = try_ex(slots['ClosingDate'])
+    policy_type = try_ex(slots['PolicyType'])
+    policy_start_date = try_ex(slots['PolicyStartDate'])
 
     confirmation_status = intent_request['sessionState']['intent']['confirmationState']
     session_attributes = intent_request['sessionState'].get("sessionAttributes") or {}
     intent = intent_request['sessionState']['intent']
     active_contexts = {}
-    
-    if intent_request['invocationSource'] == 'DialogCodeHook':
 
+    if intent_request['invocationSource'] == 'DialogCodeHook':    
         # Validate any slots which have been specified. If any are invalid, re-elicit for their value
-        validation_result = validate_loan_application(intent_request, intent_request['sessionState']['intent']['slots'])
+        input_transcript = intent_request['inputTranscript']
+        policy_type_list = ['Home', 'Auto', 'Life']
 
-        if 'isValid' in validation_result:
-            if validation_result['isValid'] == False:   
-                if validation_result['violatedSlot'] == 'CreditScore' and confirmation_status == 'Denied':
-                    print("Invalid credit score")
-                    validation_result['violatedSlot'] = 'UserName'
-                    intent['slots'] = {}
-
-                slots[validation_result['violatedSlot']] = None
-                
-                return elicit_slot(
-                    session_attributes,
-                    active_contexts,
-                    intent,
-                    validation_result['violatedSlot'],
-                    validation_result['message']
-                )  
-
-    if username and monthly_income:
-        application = {
-            'LoanValue': loan_value,
-            'MonthlyIncome': monthly_income,
-            'CreditScore': credit_score,
-            'DownPayment': down_payment
-        }
-
-        # Convert the JSON document to a string
-        application_string = json.dumps(application)
-
-        # Write the JSON document to DynamoDB
-        loan_application_table = dynamodb.Table(loan_application_table_name)
-
-        response = loan_application_table.put_item(
-            Item={
-                'userName': username,
-                'planName': 'Loan',
-                'document': application_string
+        if input_transcript in policy_type_list:
+            policy_type = input_transcript
+            policy_type_slot = {
+                "shape": "Scalar",
+                "value": {
+                    "originalValue": policy_type,
+                    "interpretedValue": policy_type,
+                    "resolvedValues": []
+                }
             }
-        )
+            slots['PolicyType'] = policy_type_slot
+        
+        validation_result = validate_insurance_quote(intent_request, username, policy_type, policy_start_date, slots)
 
-        # Determine if the intent and current slot settings have been denied
-        if confirmation_status == 'Denied' or confirmation_status == 'None':
-            return delegate(session_attributes, active_contexts, intent, 'How else can I help you?')
+        if not validation_result['isValid']:
+            slots = intent_request['sessionState']['intent']['slots']
+            slots[validation_result['violatedSlot']] = None
 
-        if confirmation_status == 'Confirmed':
-            intent['confirmationState']="Confirmed"
-            intent['state']="Fulfilled"
+            return elicit_slot(
+                session_attributes,
+                active_contexts,
+                intent_request['sessionState']['intent'],
+                validation_result['violatedSlot'],
+                validation_result['message']
+            )
 
-        s3_client.download_file(s3_artifact_bucket, 'agent/assets/Mortgage-Loan-Application.pdf', '/tmp/Mortgage-Loan-Application.pdf')
+    if username and policy_type:
 
-        reader = pdfrw.PdfReader('/tmp/Mortgage-Loan-Application.pdf')
+        # Determine which PDF to fill out based on coverage type
+        pdf_template = ''
+        fields_to_update = {}
+
+        # Based on policy_type, set the appropriate PDF template
+        if policy_type == 'Home':
+            pdf_template = 'home_insurance_template.pdf'
+        elif policy_type == 'Auto':
+            pdf_template = 'auto_insurance_template.pdf'
+        elif policy_type == 'Life':
+            pdf_template = 'life_insurance_template.pdf'
+
+        # PDF generation and S3 upload logic
+        s3_client.download_file(s3_artifact_bucket, f'agent/assets/{pdf_template}', f'/tmp/{pdf_template}')
+
+        reader = pdfrw.PdfReader(f'/tmp/{pdf_template}')
         acroform = reader.Root.AcroForm
-
-        fields_to_update = {
-            'name': username,
-            'monthlyNet9': monthly_income,
-            'creditScore3': credit_score,
-            'requestedLoan4': loan_value,
-            'downPayment12': down_payment
-        }
 
         # Get the fields from the PDF
         fields = reader.Root.AcroForm.Fields
 
-        # Loop through the fields
-        for field in fields:
-            field_name = field.T if hasattr(field, 'T') else ''
-            field_value = field.V if hasattr(field, 'V') else ''
+        # Loop through the slots to update fields and create fields_to_update dict
+        for slot_name, slot_value in slots.items():
+            field_name = slot_name.replace('_', ' ')  # Adjust field naming if necessary
+            if field_name and slot_value:
+                fields_to_update[field_name] = slot_value['value']['interpretedValue']
 
+        # Update PDF fields
         if acroform is not None and '/Fields' in acroform:
             fields = acroform['/Fields']
             for field in fields:
@@ -663,23 +823,58 @@ def loan_application(intent_request):
         writer = pdfrw.PdfWriter()
         writer.addpage(reader.pages[0])  # Assuming you are updating the first page
 
-        with open('/tmp/Mortgage-Loan-Application-Completed.pdf', 'wb') as output_stream:
+        completed_pdf_path = f'/tmp/{pdf_template.replace(".pdf", "-Completed.pdf")}'
+        with open(completed_pdf_path, 'wb') as output_stream:
             writer.write(output_stream)
             
-        s3_client.upload_file('/tmp/Mortgage-Loan-Application-Completed.pdf', s3_artifact_bucket, 'agent/assets/Mortgage-Loan-Application-Completed.pdf')
+        s3_client.upload_file(completed_pdf_path, s3_artifact_bucket, f'agent/assets/{pdf_template.replace(".pdf", "-Completed.pdf")}')
 
-        # Create loan application doc in S3
-        URLs=[]
-        URLs.append(create_presigned_url(s3_artifact_bucket,'agent/assets/Mortgage-Loan-Application-Completed.pdf',3600))
-        mortgage_app = 'Your loan application is nearly complete! Please follow the link for the last few bits of information: ' + URLs[0]
+        # Create insurance quote doc in S3
+        URLs = []
+        URLs.append(create_presigned_url(s3_artifact_bucket, f'agent/assets/{pdf_template.replace(".pdf", "-Completed.pdf")}', 3600))
+        insurance_quote_link = f'Your insurance quote is ready! Please follow the link for the details: {URLs[0]}'
 
-        print("Loan Application Submitted Successfully")
+        # Write insurance quote request data to DynamoDB
+        quote_request = {}
 
-        return elicit_intent(
-            intent_request,
-            session_attributes,
-            mortgage_app
+        # Loop through the slots to add items to quote_request dict
+        for slot_name, slot_value in slots.items():
+            if slot_value:
+                quote_request[slot_name] = slot_value['value']['interpretedValue']
+
+        # Convert the JSON document to a string
+        quote_request_string = json.dumps(quote_request)
+
+        # Write the JSON document to DynamoDB
+        insurance_quote_requests_table = dynamodb.Table(insurance_quote_requests_table_name)
+
+        response = insurance_quote_requests_table.put_item(
+            Item={
+                'UserName': username,
+                'RequestTimestamp': int(time.time()),
+                'quoteRequest': quote_request_string
+            }
         )
+
+        # Determine if the intent and current slot settings have been denied
+        if confirmation_status == 'Denied' or confirmation_status == 'None':
+            return delegate(session_attributes, active_contexts, intent, 'How else can I help you?')
+
+        if confirmation_status == 'Confirmed':
+            intent['confirmationState'] = "Confirmed"
+            intent['state'] = "Fulfilled"
+
+        print("Insurance Quote Submitted Successfully")
+
+    return elicit_intent(
+        intent_request,
+        session_attributes,
+        "Your insurance quote request has been submitted successfully. We'll be in touch shortly."
+    )
+
+
+# DEV BREAK
+
 
 def loan_calculator(intent_request):
     """
@@ -695,17 +890,22 @@ def loan_calculator(intent_request):
         'This is where you would implement LoanCalculator intent fulfillment.'
     )
 
-def invoke_agent(prompt):
+def invoke_agent(prompt, session_id):
     """
     Invokes Amazon Bedrock-powered LangChain agent with 'prompt' input.
     """
-    chat = Chat(prompt)
+    chat = Chat({'Human': prompt}, session_id)
     llm = Bedrock(client=bedrock_client, model_id="anthropic.claude-v2:1", region_name=os.environ['AWS_REGION']) # anthropic.claude-instant-v1 / anthropic.claude-3-sonnet-20240229-v1:0
     llm.model_kwargs = {'max_tokens_to_sample': 350}
     lex_agent = FSIAgent(llm, chat.memory)
     
-    # formatted_prompt = "\n\nHuman: " + prompt + " \n\nAssistant:"
     message = lex_agent.run(input=prompt)
+
+    # Summarize response and save in memory
+    formatted_prompt = "\n\nHuman: " + "Summarize the following within 50 words: " + message + " \n\nAssistant:"
+    conversation = ConversationChain(llm=llm)
+    ai_response_recap = conversation.predict(input=formatted_prompt)
+    chat.set_memory({'Assistant': ai_response_recap}, session_id)
 
     return message
 
@@ -715,11 +915,12 @@ def genai_intent(intent_request):
     Sends user utterance to the 'invoke_agent' method call.
     """
     session_attributes = intent_request['sessionState'].get("sessionAttributes") or {}
+    session_id = intent_request['sessionId']
     
     if intent_request['invocationSource'] == 'DialogCodeHook':
         prompt = intent_request['inputTranscript']
-        output = invoke_agent(prompt)
-        print("FSI Agent response: " + str(output))
+        output = invoke_agent(prompt, session_id)
+        print(f"Insurance Agent response: {output}")
 
     return elicit_intent(intent_request, session_attributes, output)
 
@@ -735,8 +936,8 @@ def dispatch(intent_request):
 
     if intent_name == 'VerifyIdentity':
         return verify_identity(intent_request)
-    elif intent_name == 'LoanApplication':
-        return loan_application(intent_request)
+    elif intent_name == 'InsuranceQuoteRequest':
+        return generate_insurance_quote(intent_request)
     elif intent_name == 'LoanCalculator':
         return loan_calculator(intent_request)
     else:

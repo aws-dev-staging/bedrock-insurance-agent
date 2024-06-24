@@ -5,7 +5,8 @@
 
 export UNIQUE_IDENTIFIER=$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-' | cut -c 1-5)
 export S3_ARTIFACT_BUCKET_NAME=$STACK_NAME-$UNIQUE_IDENTIFIER
-export DATA_LOADER_S3_KEY="agent/lambda/data-loader/loader_deployment_package.zip"
+export USERS_DATA_LOADER_S3_KEY="agent/lambda/users-data-loader/users_loader_deployment_package.zip"
+export CLAIMS_DATA_LOADER_S3_KEY="agent/lambda/claims-data-loader/claims_loader_deployment_package.zip"
 export LAMBDA_HANDLER_S3_KEY="agent/lambda/agent-handler/agent_deployment_package.zip"
 export LEX_BOT_S3_KEY="agent/bot/lex.zip"
 
@@ -33,15 +34,16 @@ export CFNRESPONSE_LAYER_ARN=$(aws lambda publish-layer-version \
     --region $AWS_REGION \
     --query LayerVersionArn --output text)
 
-export GITHUB_TOKEN_SECRET_NAME=$(aws secretsmanager create-secret --name $STACK_NAME-git-pat \
+export GITHUB_TOKEN_SECRET_NAME=$(aws secretsmanager create-secret --name $STACK_NAME-git-pat-$UNIQUE_IDENTIFIER \
 --secret-string $GITHUB_PAT --region $AWS_REGION --query Name --output text)
 
 aws cloudformation create-stack \
 --stack-name $STACK_NAME \
---template-body file://../cfn/GenAI-FSI-Agent.yml \
+--template-body file://../cfn/GenAI-Insurance-Agent.yml \
 --parameters \
 ParameterKey=S3ArtifactBucket,ParameterValue=$S3_ARTIFACT_BUCKET_NAME \
-ParameterKey=DataLoaderS3Key,ParameterValue=$DATA_LOADER_S3_KEY \
+ParameterKey=UsersDataLoaderS3Key,ParameterValue=$USERS_DATA_LOADER_S3_KEY \
+ParameterKey=ClaimsDataLoaderS3Key,ParameterValue=$CLAIMS_DATA_LOADER_S3_KEY \
 ParameterKey=LambdaHandlerS3Key,ParameterValue=$LAMBDA_HANDLER_S3_KEY \
 ParameterKey=LexBotS3Key,ParameterValue=$LEX_BOT_S3_KEY \
 ParameterKey=BedrockLangChainPDFRWLayerArn,ParameterValue=$BEDROCK_LANGCHAIN_PDFRW_LAYER_ARN \
