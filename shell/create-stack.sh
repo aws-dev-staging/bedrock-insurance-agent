@@ -38,7 +38,7 @@ export GITHUB_TOKEN_SECRET_NAME=$(aws secretsmanager create-secret --name $STACK
 --secret-string $GITHUB_PAT --region $AWS_REGION --query Name --output text)
 
 aws cloudformation create-stack \
---stack-name $STACK_NAME \
+--stack-name $STACK_NAME-$UNIQUE_IDENTIFIER \
 --template-body file://../cfn/GenAI-Insurance-Agent.yml \
 --parameters \
 ParameterKey=S3ArtifactBucket,ParameterValue=$S3_ARTIFACT_BUCKET_NAME \

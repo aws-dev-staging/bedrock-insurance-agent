@@ -1,3 +1,4 @@
+import re
 import os
 import json
 import time
@@ -152,20 +153,32 @@ def build_validation_result(isvalid, violated_slot, message_content):
     
 # --- Utility helper functions ---
 
+def isvalid_number(value):
+    # regex to match a valid numeric string without leading '-' for negative numbers or value "0"
+    return bool(re.match(r'^(?:[1-9]\d*|[1-9]\d*\.\d+|\d*\.\d+)$', value))
+
+def isvalid_date(year):
+    try:
+        year_int = int(year)
+        current_year = int(datetime.datetime.now().year)
+        print(f"Year input: {year_int}, Current year: {current_year}")  # Debugging output
+        # Validate if the year is within a reasonable range
+        if year_int <= 0 or year_int > current_year:
+            return False
+        return True
+    except ValueError as e:
+        print(f"isvalid_date error: {e}")
+        return False
+
 def isvalid_slot_value(value, slot_value_list):
     # Adjust this threshold as needed
-    similarity_threshold = 0.7
+    similarity_threshold = 0.5
 
     # Calculate similarity using difflib
     similarity_scores = [difflib.SequenceMatcher(None, value.lower(), ref_value).ratio() for ref_value in slot_value_list]
 
     # Check if the word is close to 'yes' or 'no' based on similarity threshold
     return any(score >= similarity_threshold for score in similarity_scores)
-
-def isvalid_credit_score(credit_score):
-    if int(credit_score) < 851 and int(credit_score) > 300:
-        return True
-    return False
 
 def create_presigned_url(bucket_name, object_name, expiration=600):
     """
@@ -384,17 +397,11 @@ def validate_home_insurance(intent_request, session_id, property_value, year_bui
     Validates slot values specific to Home insurance.
     """
     if property_value is not None:
-        if not property_value.isnumeric():
+        if not isvalid_number(property_value):
             prompt = "The user was just asked to provide their property value as part of a home insurance quote request and this was their response: " + intent_request['inputTranscript']
             message = invoke_agent(prompt, session_id)
             reply = message + " \n\nWhat is the estimated value of your home?"
             return build_validation_result(False, 'PropertyValue', reply)
-        elif int(property_value) < 0:
-            return build_validation_result(
-                False,
-                'PropertyValue',
-                'The property value must be a positive number.'
-            )
     else:
         return build_validation_result(
             False,
@@ -403,17 +410,11 @@ def validate_home_insurance(intent_request, session_id, property_value, year_bui
         )
 
     if year_built is not None:
-        if not year_built.isnumeric():
-            prompt = "The user was just asked to provide the year their home was built as part of an insurance quote request and this was their response: " + intent_request['inputTranscript']
+        if not isvalid_date(year_built):
+            prompt = "The user was just asked to provide the year their home was built as part of a home insurance quote request and this was their response: " + intent_request['inputTranscript']
             message = invoke_agent(prompt, session_id)
             reply = message + " \n\nWhich year was your home built?"
-            return build_validation_result(False, 'PropertyValue', reply)
-        elif int(year_built) < 0 or int(year_built) > datetime.datetime.now().year: 
-            return build_validation_result(
-                False,
-                'YearBuilt',
-                'The year built must be a valid year.'
-            )
+            return build_validation_result(False, 'YearBuilt', reply)
     else:
         return build_validation_result(
             False,
@@ -424,7 +425,7 @@ def validate_home_insurance(intent_request, session_id, property_value, year_bui
     if home_type is not None:
         home_type_list = ['single-family', 'multi-family', 'condo', 'townhouse']
         if not isvalid_slot_value(home_type, home_type_list):
-            prompt = "The user was asked to specify the type of home [Single-Family, Multi-Family, Condo, Townhouse] and this was their response: " + intent_request['inputTranscript']
+            prompt = "The user was asked to specify the type of home [Single-Family, Multi-Family, Condo, Townhouse] as part of a home insurance quote request and this was their response: " + intent_request['inputTranscript']
             message = invoke_agent(prompt, session_id)
             reply = message + " \n\nPlease specify the type of home [Single-Family, Multi-Family, Condo, Townhouse]."
             return build_validation_result(False, 'HomeType', reply)
@@ -436,18 +437,11 @@ def validate_home_insurance(intent_request, session_id, property_value, year_bui
         )
 
     if square_footage is not None:
-        if square_footage.isnumeric():
-            if int(square_footage) < 0:
-                return build_validation_result(
-                    False,
-                    'SquareFootage',
-                    'The square footage must be a positive number.'
-                )
-        else:
-            prompt = "The user was just asked to provide the square footage of their home as part of an insurance quote request and this was their response: " + intent_request['inputTranscript']
+        if not isvalid_number(square_footage):
+            prompt = "The user was just asked to provide the square footage of their home as part of a home insurance quote request and this was their response: " + intent_request['inputTranscript']
             message = invoke_agent(prompt, session_id)
             reply = message + " \n\nWhat is the square footage of your home?"
-            return build_validation_result(False, 'PropertyValue', reply)
+            return build_validation_result(False, 'SquareFootage', reply)
     else:
         return build_validation_result(
             False,
@@ -458,7 +452,7 @@ def validate_home_insurance(intent_request, session_id, property_value, year_bui
     if home_security_system is not None:
         security_system_list = ['yes', 'no']
         if not isvalid_slot_value(home_security_system, security_system_list):
-            prompt = "The user was asked if they have a home security system [Yes, No] as part of an insurance quote request and this was their response: " + intent_request['inputTranscript']
+            prompt = "The user was asked if they have a home security system [Yes, No] as part of a home insurance quote request and this was their response: " + intent_request['inputTranscript']
             message = invoke_agent(prompt, session_id)
             reply = message + " \n\nDo you have a home security system [Yes, No]?"
             return build_validation_result(False, 'HomeSecuritySystem', reply)
@@ -472,7 +466,7 @@ def validate_home_insurance(intent_request, session_id, property_value, year_bui
     if home_coverage is not None:
         home_coverage_list = ['structure', 'contents', 'liability']
         if not isvalid_slot_value(home_coverage, home_coverage_list):
-            prompt = "The user was asked to specify the type of home coverage [Structure, Contents, Liability] as part of an insurance quote request and this was their response: " + intent_request['inputTranscript']
+            prompt = "The user was asked to specify the type of home coverage [Structure, Contents, Liability] as part of a home insurance quote request and this was their response: " + intent_request['inputTranscript']
             message = invoke_agent(prompt, session_id)
             reply = message + " \n\nPlease specify the type of home coverage [Structure, Contents, Liability]."
             return build_validation_result(False, 'HomeCoverage', reply)
@@ -489,14 +483,7 @@ def validate_auto_insurance(intent_request, session_id, property_value, age_of_i
     Validates slot values specific to Auto insurance.
     """
     if property_value is not None:
-        if property_value.isnumeric():
-            if int(property_value) < 0:
-                return build_validation_result(
-                    False,
-                    'PropertyValue',
-                    'The car value must be a positive number.'
-                )
-        else:
+        if not isvalid_number(property_value):
             prompt = "The user was just asked for their car value as part of an auto insurance quote request and this was their response: " + intent_request['inputTranscript']
             message = invoke_agent(prompt, session_id)
             reply = message + " \n\nWhat is the estimated value of your car?"
@@ -509,14 +496,7 @@ def validate_auto_insurance(intent_request, session_id, property_value, age_of_i
         )
 
     if age_of_insured is not None:
-        if age_of_insured.isnumeric():
-            if int(age_of_insured) < 17:
-                return build_validation_result(
-                    False,
-                    'AgeOfInsured',
-                    'The age of the insured must be 18 years or older.'
-                )
-        else:
+        if not isvalid_number(age_of_insured):
             prompt = "The user was just asked for the age of the insured on an auto insurance quote request and this was their response: " + intent_request['inputTranscript']
             message = invoke_agent(prompt, session_id)
             reply = message + " \n\nWhat is the age of the insured?"
@@ -529,17 +509,11 @@ def validate_auto_insurance(intent_request, session_id, property_value, age_of_i
         )
 
     if auto_year is not None:
-        if not auto_year.isnumeric():
+        if not isvalid_date(auto_year):
             prompt = "The user was just asked which year their vehicle was built as part of an auto insurance quote request and this was their response: " + intent_request['inputTranscript']
             message = invoke_agent(prompt, session_id)
             reply = message + " \n\nWhich year was your vehicle built?"
             return build_validation_result(False, 'AutoYear', reply)        
-        elif int(auto_year) < 0 or int(auto_year) > datetime.datetime.now().year:
-            return build_validation_result(
-                False,
-                'AutoYear',
-                'Specify a valid build year for your vehicle.'
-            )
     else:
         return build_validation_result(
             False,
@@ -548,14 +522,7 @@ def validate_auto_insurance(intent_request, session_id, property_value, age_of_i
         )
 
     if annual_mileage is not None:
-        if annual_mileage.isnumeric():
-            if int(annual_mileage) < 0:
-                return build_validation_result(
-                    False,
-                    'AnnualMileage',
-                    'Annual mileage must be a positive number.'
-                )
-        else:
+        if not isvalid_number(annual_mileage):
             prompt = "The user was just asked for the estimated annual mileage as part of an auto insurance quote request and this was their response: " + intent_request['inputTranscript']
             message = invoke_agent(prompt, session_id)
             reply = message + " \n\nWhat is the estimated annual mileage of your car?"
@@ -616,14 +583,7 @@ def validate_life_insurance(intent_request, session_id, life_policy_type, age_of
         )
 
     if age_of_insured is not None:
-        if age_of_insured.isnumeric():
-            if int(age_of_insured) < 0:
-                return build_validation_result(
-                    False,
-                    'AgeOfInsured',
-                    'The age of the insured must be a positive number.'
-                )
-        else:
+        if not isvalid_number(age_of_insured):
             prompt = "The user was just asked for the age of the insured as part of a life insurance quote request and this was their response: " + intent_request['inputTranscript']
             message = invoke_agent(prompt, session_id)
             reply = message + " \n\nWhat is the age of the insured?"
@@ -636,18 +596,11 @@ def validate_life_insurance(intent_request, session_id, life_policy_type, age_of
         )
 
     if annual_income is not None:
-        if annual_income.isnumeric():
-            if int(annual_income) < 0:
-                return build_validation_result(
-                    False,
-                    'AnnualIncome',
-                    'Annual income must be a positive number.'
-                )                
-        else:
+        if not isvalid_number(annual_income):
             prompt = "The user was asked for the insured's annual income as part of a life insurance quote request and this was their response: " + intent_request['inputTranscript']
             message = invoke_agent(prompt, session_id)
             reply = message + " \n\nWhat is the insured's annual income?"
-            return build_validation_result(False, 'AnnualIncome', reply)
+            return build_validation_result(False, 'AnnualIncome', reply)               
     else:
         return build_validation_result(
             False,
@@ -679,7 +632,7 @@ def validate_insurance_quote(intent_request, username, policy_type, policy_start
             return build_validation_result(
                 False,
                 'UserName',
-                'We cannot find an account under that username. Please try again with a valid username.'
+                'You have been logged out. Please start a new session.'
             )
 
     if policy_type is not None:
