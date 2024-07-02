@@ -49,7 +49,7 @@ During solution deployment, the _UsersTable_ DynamoDB table is loaded with synth
 The following is the resultant loan application document completed through the conversational flow:
 
 <p align="center">
-  <img src="../design/mortgage-app.png" width="80%" height="80%">
+  <img src="../design/home-quote-request.png" width="80%" height="80%">
 </p>
 
 Multi-channel support functionality can be tested in conjunction with the above assessment measures across Web, SMS, and Voice channels.
