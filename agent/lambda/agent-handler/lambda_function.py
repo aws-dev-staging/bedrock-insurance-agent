@@ -10,7 +10,7 @@ import datetime
 import dateutil.parser
 
 from chat import Chat
-from fsi_agent import FSIAgent
+from insurance_agent import InsuranceAgent
 from boto3.dynamodb.conditions import Key
 from langchain.llms.bedrock import Bedrock
 from langchain.chains import ConversationChain
@@ -170,13 +170,14 @@ def isvalid_date(year):
         print(f"isvalid_date error: {e}")
         return False
 
-def isvalid_slot_value(value, slot_value_list):
+def isvalid_slot_value(value, slot_value_list): # Need to adjust
     # Adjust this threshold as needed
-    similarity_threshold = 0.5
+    similarity_threshold = 0.65
 
     # Calculate similarity using difflib
     similarity_scores = [difflib.SequenceMatcher(None, value.lower(), ref_value).ratio() for ref_value in slot_value_list]
 
+    print(f"isvalid_slot_value similarity_scores: {similarity_scores}")
     # Check if the word is close to 'yes' or 'no' based on similarity threshold
     return any(score >= similarity_threshold for score in similarity_scores)
 
@@ -392,10 +393,38 @@ def verify_identity(intent_request):
                 return e
 
 
-def validate_home_insurance(intent_request, session_id, property_value, year_built, home_type, square_footage, home_security_system, home_coverage):
+def validate_home_insurance(intent_request, session_id, home_coverage, home_type, property_value, year_built, square_footage, home_security_system):
     """
     Validates slot values specific to Home insurance.
     """
+    if home_coverage is not None:
+        home_coverage_list = ['structure', 'contents', 'liability', 'all']
+        if not isvalid_slot_value(home_coverage, home_coverage_list):
+            prompt = "The user was asked to specify the type of home coverage [Structure, Contents, Liability, All] as part of a home insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nPlease specify the type of home coverage [Structure, Contents, Liability, All]."
+            return build_validation_result(False, 'HomeCoverage', reply)
+    else:
+        return build_validation_result(
+            False,
+            'HomeCoverage',
+            'Please specify the type of home coverage [Structure, Contents, Liability, All].'
+        )   
+
+    if home_type is not None:
+        home_type_list = ['single-family', 'multi-family', 'condo', 'townhouse']
+        if not isvalid_slot_value(home_type, home_type_list):
+            prompt = "The user was asked to specify the type of home [Single-Family, Multi-Family, Condo, Townhouse] as part of a home insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nPlease specify the type of home [Single-Family, Multi-Family, Condo, Townhouse]."
+            return build_validation_result(False, 'HomeType', reply)
+    else:
+        return build_validation_result(
+            False,
+            'HomeType',
+            'Please specify the type of home [Single-Family, Multi-Family, Condo, Townhouse].'
+        )
+
     if property_value is not None:
         if not isvalid_number(property_value):
             prompt = "The user was just asked to provide their property value as part of a home insurance quote request and this was their response: " + intent_request['inputTranscript']
@@ -420,20 +449,6 @@ def validate_home_insurance(intent_request, session_id, property_value, year_bui
             False,
             'YearBuilt',
             'Which year was your home built?'
-        )
-
-    if home_type is not None:
-        home_type_list = ['single-family', 'multi-family', 'condo', 'townhouse']
-        if not isvalid_slot_value(home_type, home_type_list):
-            prompt = "The user was asked to specify the type of home [Single-Family, Multi-Family, Condo, Townhouse] as part of a home insurance quote request and this was their response: " + intent_request['inputTranscript']
-            message = invoke_agent(prompt, session_id)
-            reply = message + " \n\nPlease specify the type of home [Single-Family, Multi-Family, Condo, Townhouse]."
-            return build_validation_result(False, 'HomeType', reply)
-    else:
-        return build_validation_result(
-            False,
-            'HomeType',
-            'Please specify the type of home [Single-Family, Multi-Family, Condo, Townhouse].'
         )
 
     if square_footage is not None:
@@ -463,37 +478,28 @@ def validate_home_insurance(intent_request, session_id, property_value, year_bui
             'Do you have a home security system [Yes, No]?'
         )
 
-    if home_coverage is not None:
-        home_coverage_list = ['structure', 'contents', 'liability']
-        if not isvalid_slot_value(home_coverage, home_coverage_list):
-            prompt = "The user was asked to specify the type of home coverage [Structure, Contents, Liability] as part of a home insurance quote request and this was their response: " + intent_request['inputTranscript']
-            message = invoke_agent(prompt, session_id)
-            reply = message + " \n\nPlease specify the type of home coverage [Structure, Contents, Liability]."
-            return build_validation_result(False, 'HomeCoverage', reply)
-    else:
-        return build_validation_result(
-            False,
-            'HomeCoverage',
-            'Please specify the type of home coverage [Structure, Contents, Liability].'
-        )   
+    return {'isValid': True}
 
-
-def validate_auto_insurance(intent_request, session_id, property_value, age_of_insured, auto_year, annual_mileage, parking_location, previous_claims):
+def validate_auto_insurance(intent_request, session_id, auto_coverage, age_of_insured, property_value, auto_year, annual_mileage, parking_location, previous_claims):
     """
     Validates slot values specific to Auto insurance.
     """
-    if property_value is not None:
-        if not isvalid_number(property_value):
-            prompt = "The user was just asked for their car value as part of an auto insurance quote request and this was their response: " + intent_request['inputTranscript']
+    print(f"validate_auto_insurance auto_coverage: {auto_coverage}")
+    if auto_coverage is not None:
+        print(f"auto_coverage: {auto_coverage}")
+        auto_coverage_list = ['liability', 'collision', 'comprehensive', 'all']
+        if not isvalid_slot_value(auto_coverage, auto_coverage_list):
+            prompt = "The user was asked to specify the type of auto coverage [Liability, Collision, Comprehensive, All] as part of a home insurance quote request and this was their response: " + intent_request['inputTranscript']
             message = invoke_agent(prompt, session_id)
-            reply = message + " \n\nWhat is the estimated value of your car?"
-            return build_validation_result(False, 'PropertyValue', reply)
+            reply = message + " \n\nPlease specify the type of auto coverage [Liability, Collision, Comprehensive, All]."
+            return build_validation_result(False, 'AutoCoverage', reply)
     else:
+        print("ELSE")
         return build_validation_result(
             False,
-            'PropertyValue',
-            'What is the estimated value of your car?'
-        )
+            'AutoCoverage',
+            'Please specify the type of auto coverage [Liability, Collision, Comprehensive, All].'
+        )   
 
     if age_of_insured is not None:
         if not isvalid_number(age_of_insured):
@@ -506,6 +512,19 @@ def validate_auto_insurance(intent_request, session_id, property_value, age_of_i
             False,
             'AgeOfInsured',
             'What is the age of the insured?'
+        )
+
+    if property_value is not None:
+        if not isvalid_number(property_value):
+            prompt = "The user was just asked for their car value as part of an auto insurance quote request and this was their response: " + intent_request['inputTranscript']
+            message = invoke_agent(prompt, session_id)
+            reply = message + " \n\nWhat is the estimated value of your car?"
+            return build_validation_result(False, 'PropertyValue', reply)
+    else:
+        return build_validation_result(
+            False,
+            'PropertyValue',
+            'What is the estimated value of your car?'
         )
 
     if auto_year is not None:
@@ -562,6 +581,7 @@ def validate_auto_insurance(intent_request, session_id, property_value, age_of_i
             'Have you filed any auto insurance claims in the past three years [Yes/No]?'
         )
 
+    return {'isValid': True}
 
 def validate_life_insurance(intent_request, session_id, life_policy_type, age_of_insured, annual_income):
     """
@@ -608,6 +628,7 @@ def validate_life_insurance(intent_request, session_id, life_policy_type, age_of
             "What is the insured's annual income?"
         )
 
+    return {'isValid': True}
 
 def validate_insurance_quote(intent_request, username, policy_type, policy_start_date, slots):
     """
@@ -638,28 +659,28 @@ def validate_insurance_quote(intent_request, username, policy_type, policy_start
     if policy_type is not None:
         if policy_type == 'Home':
             # Home slot values
+            home_coverage = try_ex(slots['HomeCoverage'])
+            home_type = try_ex(slots['HomeType'])
             property_value = try_ex(slots['PropertyValue'])
             year_built = try_ex(slots['YearBuilt'])
-            home_type = try_ex(slots['HomeType'])
             square_footage = try_ex(slots['SquareFootage'])
             home_security_system = try_ex(slots['HomeSecuritySystem'])
-            home_coverage = try_ex(slots['HomeCoverage'])
 
-            validation_results = validate_home_insurance(intent_request, session_id, property_value, year_built, home_type, square_footage, home_security_system, home_coverage)
-
+            validation_results = validate_home_insurance(intent_request, session_id, home_coverage, home_type, property_value, year_built, square_footage, home_security_system)
             if not validation_results['isValid']:
                 return validation_results
 
         elif policy_type == 'Auto':
             # Auto slot values
-            property_value = try_ex(slots['PropertyValue'])
+            auto_coverage = try_ex(slots['AutoCoverage'])
             age_of_insured = try_ex(slots['AgeOfInsured'])
+            property_value = try_ex(slots['PropertyValue'])
             auto_year = try_ex(slots['AutoYear'])
             annual_mileage = try_ex(slots['AnnualMileage'])
             parking_location = try_ex(slots['ParkingLocation'])
             previous_claims = try_ex(slots['PreviousClaims'])
 
-            validation_results = validate_auto_insurance(intent_request, session_id, property_value, age_of_insured, auto_year, annual_mileage, parking_location, previous_claims)
+            validation_results = validate_auto_insurance(intent_request, session_id, auto_coverage, age_of_insured, property_value, auto_year, annual_mileage, parking_location, previous_claims)
             if not validation_results['isValid']:
                 return validation_results
 
@@ -742,6 +763,14 @@ def generate_insurance_quote(intent_request):
         pdf_template = ''
         fields_to_update = {}
 
+        # Determine if the intent and current slot settings have been denied
+        if confirmation_status == 'Denied' or confirmation_status == 'None':
+            return delegate(session_attributes, active_contexts, intent, 'How else can I help you?')
+
+        if confirmation_status == 'Confirmed':
+            intent['confirmationState']="Confirmed"
+            intent['state']="Fulfilled"
+
         # Based on policy_type, set the appropriate PDF template
         if policy_type == 'Home':
             pdf_template = 'home_insurance_template.pdf'
@@ -758,6 +787,9 @@ def generate_insurance_quote(intent_request):
 
         # Get the fields from the PDF
         fields = reader.Root.AcroForm.Fields
+
+        # Extract and print field names
+        field_names = [field['/T'][1:-1] for field in fields if '/T' in field]
 
         # Loop through the slots to update fields and create fields_to_update dict
         for slot_name, slot_value in slots.items():
@@ -776,16 +808,16 @@ def generate_insurance_quote(intent_request):
         writer = pdfrw.PdfWriter()
         writer.addpage(reader.pages[0])  # Assuming you are updating the first page
 
-        completed_pdf_path = f'/tmp/{pdf_template.replace(".pdf", "-Completed.pdf")}'
+        completed_pdf_path = f'/tmp/{pdf_template.replace(".pdf", "-completed.pdf")}'
         with open(completed_pdf_path, 'wb') as output_stream:
             writer.write(output_stream)
             
-        s3_client.upload_file(completed_pdf_path, s3_artifact_bucket, f'agent/assets/{pdf_template.replace(".pdf", "-Completed.pdf")}')
+        s3_client.upload_file(completed_pdf_path, s3_artifact_bucket, f'agent/assets/{pdf_template.replace(".pdf", "-completed.pdf")}')
 
         # Create insurance quote doc in S3
         URLs = []
-        URLs.append(create_presigned_url(s3_artifact_bucket, f'agent/assets/{pdf_template.replace(".pdf", "-Completed.pdf")}', 3600))
-        insurance_quote_link = f'Your insurance quote is ready! Please follow the link for the details: {URLs[0]}'
+        URLs.append(create_presigned_url(s3_artifact_bucket, f'agent/assets/{pdf_template.replace(".pdf", "-completed.pdf")}', 3600))
+        insurance_quote_link = f'Your insurance quote request is ready! Please follow the link for details: {URLs[0]}'
 
         # Write insurance quote request data to DynamoDB
         quote_request = {}
@@ -809,21 +841,13 @@ def generate_insurance_quote(intent_request):
             }
         )
 
-        # Determine if the intent and current slot settings have been denied
-        if confirmation_status == 'Denied' or confirmation_status == 'None':
-            return delegate(session_attributes, active_contexts, intent, 'How else can I help you?')
+        print("Insurance Quote Request Submitted Successfully")
 
-        if confirmation_status == 'Confirmed':
-            intent['confirmationState'] = "Confirmed"
-            intent['state'] = "Fulfilled"
-
-        print("Insurance Quote Submitted Successfully")
-
-    return elicit_intent(
-        intent_request,
-        session_attributes,
-        "Your insurance quote request has been submitted successfully. We'll be in touch shortly."
-    )
+        return elicit_intent(
+            intent_request,
+            session_attributes,
+            insurance_quote_link
+        )
 
 
 # DEV BREAK
@@ -850,7 +874,7 @@ def invoke_agent(prompt, session_id):
     chat = Chat({'Human': prompt}, session_id)
     llm = Bedrock(client=bedrock_client, model_id="anthropic.claude-v2:1", region_name=os.environ['AWS_REGION']) # anthropic.claude-instant-v1 / anthropic.claude-3-sonnet-20240229-v1:0
     llm.model_kwargs = {'max_tokens_to_sample': 350}
-    lex_agent = FSIAgent(llm, chat.memory)
+    lex_agent = InsuranceAgent(llm, chat.memory)
     
     message = lex_agent.run(input=prompt)
 
