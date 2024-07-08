@@ -20,7 +20,7 @@ This sample solution creates a generative AI insurance agent powered by Amazon B
 
 [<img src="design/amplify-website.png" width="100%">](https://www.youtube.com/watch?v=CGRw_M0uC4A "Building Generative AI Agents: Amazon Bedrock, Amazon DynamoDB, Amazon Kendra, Amazon Lex, LangChain - YouTube")
 
-- **Provide Personalized Responses** - Query DynamoDB for customer account information, such as mortgage summary details, due balance, and next payment date.
+- **Provide Personalized Responses** - Query DynamoDB for customer account information, such as insurance coverage details, due balance, and next payment date.
 - **Access General Knowledge** - Harness the agent’s reasoning logic in tandem with the vast amounts of data used to pretrain the different FMs provided through Bedrock to produce replies for any customer prompt.
 - **Curate Opinionated Answers** - Inform agent responses using a Kendra Index configured with authoritative data sources: customer documents stored in [Amazon Simple Storage Service](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) (S3) and [Web Crawler](https://docs.aws.amazon.com/kendra/latest/dg/data-source-web-crawler.html/) configured for the customer's website.
 
