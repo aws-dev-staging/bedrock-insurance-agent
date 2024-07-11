@@ -8,7 +8,7 @@ The following testing procedure aims to verify that the generative AI insurance 
 During solution deployment, the _UsersTable_ DynamoDB table is loaded with synthetic user data using [users.json](../agent/lambda/users-data-loader/users.json). The table contains three users (Home User, Auto User, Life User), all of which use the PIN, 1234.
 
 <p align="center">
-  <img src="../design/users-table.png" width="50%" height="50%">
+  <img src="../design/users-table.png">
 </p>
 
 - **Provide Personalized Responses:** Verify the agent successfully accesses and utilizes relevant customer information in Amazon DynamoDB to tailor user-specific responses.
