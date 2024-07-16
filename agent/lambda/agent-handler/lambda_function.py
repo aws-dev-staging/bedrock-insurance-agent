@@ -732,16 +732,7 @@ def generate_insurance_quote(intent_request):
         policy_type_list = ['Home', 'Auto', 'Life']
 
         if input_transcript in policy_type_list:
-            policy_type = input_transcript
-            policy_type_slot = {
-                "shape": "Scalar",
-                "value": {
-                    "originalValue": policy_type,
-                    "interpretedValue": policy_type,
-                    "resolvedValues": []
-                }
-            }
-            slots['PolicyType'] = policy_type_slot
+            build_slot(intent_request, 'PolicyTy', input_transcript)
         
         validation_result = validate_insurance_quote(intent_request, username, policy_type, policy_start_date, slots)
 
