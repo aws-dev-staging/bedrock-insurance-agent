@@ -10,7 +10,7 @@ import datetime
 import dateutil.parser
 
 from chat import Chat
-from home_warranty_agent import HomeWarrantyAgent
+from insurance_agent import InsuranceAgent
 from boto3.dynamodb.conditions import Key
 from langchain.llms.bedrock import Bedrock
 from langchain.chains import ConversationChain
